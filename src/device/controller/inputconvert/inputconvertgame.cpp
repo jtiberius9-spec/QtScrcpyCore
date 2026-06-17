@@ -327,26 +327,44 @@ void InputConvertGame::processSteerWheel(const KeyMap::KeyMapNode &node, const Q
         m_ctrlSteerWheel.pressedLeft = flag;
     }
 
-    // calc offset and pressed number
-    QPointF offset(0.0, 0.0);
+    // Build a direction vector from the pressed keys (screen space: +x right,
+    // +y down) and count how many are held.
     int pressedNum = 0;
-    if (m_ctrlSteerWheel.pressedUp) {
-        ++pressedNum;
-        offset.ry() -= node.data.steerWheel.up.extendOffset;
-    }
-    if (m_ctrlSteerWheel.pressedRight) {
-        ++pressedNum;
-        offset.rx() += node.data.steerWheel.right.extendOffset;
-    }
-    if (m_ctrlSteerWheel.pressedDown) {
-        ++pressedNum;
-        offset.ry() += node.data.steerWheel.down.extendOffset;
-    }
-    if (m_ctrlSteerWheel.pressedLeft) {
-        ++pressedNum;
-        offset.rx() -= node.data.steerWheel.left.extendOffset;
-    }
+    double dirX = 0.0, dirY = 0.0;
+    if (m_ctrlSteerWheel.pressedUp)    { ++pressedNum; dirY -= 1.0; }
+    if (m_ctrlSteerWheel.pressedRight) { ++pressedNum; dirX += 1.0; }
+    if (m_ctrlSteerWheel.pressedDown)  { ++pressedNum; dirY += 1.0; }
+    if (m_ctrlSteerWheel.pressedLeft)  { ++pressedNum; dirX -= 1.0; }
     m_ctrlSteerWheel.delayData.pressedNum = pressedNum;
+
+    // Project the touch onto a CIRCLE of uniform on-screen (pixel) radius.
+    //
+    // The keymap offsets are RELATIVE (0..1), but the device maps x by frame
+    // WIDTH and y by frame HEIGHT (see calcFrameAbsolutePos). On a landscape
+    // phone (width >> height) equal relative offsets are NOT equal on screen,
+    // so summing them made diagonals (W+A / W+D) collapse toward horizontal
+    // (you walked sideways instead of strafing) and forward never reached the
+    // sprint rim (walk instead of run). We therefore compute everything in
+    // pixels on a single circle, then convert back to relative coordinates so
+    // every direction travels the same distance at the correct angle.
+    QPointF offset(0.0, 0.0);
+    const double fw = m_frameSize.width();
+    const double fh = m_frameSize.height();
+    if (pressedNum > 0 && fw > 0.0 && fh > 0.0) {
+        // Circle radius in PIXELS = the largest configured reach in any
+        // direction, so the user's drag-radius is honoured and the wheel
+        // always pushes out to full tilt (run, not walk) in every direction.
+        const double radiusPx = qMax(
+            qMax(node.data.steerWheel.up.extendOffset   * fh,
+                 node.data.steerWheel.down.extendOffset  * fh),
+            qMax(node.data.steerWheel.left.extendOffset  * fw,
+                 node.data.steerWheel.right.extendOffset * fw));
+        const double len = sqrt(dirX * dirX + dirY * dirY);
+        if (len > 0.0 && radiusPx > 0.0) {
+            offset.setX((radiusPx * dirX / len) / fw);  // pixels -> relative x
+            offset.setY((radiusPx * dirY / len) / fh);  // pixels -> relative y
+        }
+    }
 
     // last key release and timer no active, active timer to detouch
     if (pressedNum == 0) {
