@@ -43,6 +43,11 @@ void Recorder::setFrameSize(const QSize &declaredFrameSize)
     m_declaredFrameSize = declaredFrameSize;
 }
 
+void Recorder::setCodec(quint32 codecId)
+{
+    m_codecId = codecId;
+}
+
 void Recorder::setFormat(Recorder::RecorderFormat format)
 {
     m_format = format;
@@ -50,10 +55,19 @@ void Recorder::setFormat(Recorder::RecorderFormat format)
 
 bool Recorder::open()
 {
+    // record the stream's actual codec (the demuxer/decoder negotiated it):
+    // "h264"=0x68323634, "h265"=0x68323635, "av1"=0x00617631; default H264.
+    AVCodecID avCodecId = AV_CODEC_ID_H264;
+    if (m_codecId == 0x68323635) {
+        avCodecId = AV_CODEC_ID_HEVC;
+    } else if (m_codecId == 0x00617631) {
+        avCodecId = AV_CODEC_ID_AV1;
+    }
+
     // codec
-    const AVCodec* inputCodec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    const AVCodec* inputCodec = avcodec_find_decoder(avCodecId);
     if (!inputCodec) {
-        qCritical("H.264 decoder not found");
+        qCritical("video decoder not found for recorder (codec id 0x%x)", m_codecId);
         return false;
     }
 
@@ -78,7 +92,7 @@ bool Recorder::open()
 
     m_formatCtx->oformat = (AVOutputFormat *)format;
 
-    QString comment = "Recorded by QtScrcpy " + QCoreApplication::applicationVersion();
+    QString comment = "Recorded by Wraith " + QCoreApplication::applicationVersion();
     av_dict_set(&m_formatCtx->metadata, "comment", comment.toUtf8(), 0);
 
     AVStream *outStream = avformat_new_stream(m_formatCtx, inputCodec);

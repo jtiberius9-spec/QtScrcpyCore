@@ -27,6 +27,7 @@ public:
     virtual ~Recorder();
 
     void setFrameSize(const QSize &declaredFrameSize);
+    void setCodec(quint32 codecId);   // scrcpy 视频编码 fourcc: h264/h265/av1
     void setFormat(Recorder::RecorderFormat format);
     bool open();
     void close();
@@ -54,6 +55,7 @@ private:
     QString m_fileName = "";
     AVFormatContext *m_formatCtx = Q_NULLPTR;
     QSize m_declaredFrameSize;
+    quint32 m_codecId = 0;   // scrcpy 视频编码 fourcc; 0 -> 默认 H264
     bool m_headerWritten = false;
     RecorderFormat m_format = RECORDER_FORMAT_NULL;
     QMutex m_mutex;

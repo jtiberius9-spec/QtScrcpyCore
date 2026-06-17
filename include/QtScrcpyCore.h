@@ -125,6 +125,23 @@ public:
 
     virtual void updateScript(QString script) = 0;
     virtual bool isCurrentCustomKeymap() = 0;
+
+    // Mid-session screen recording (Wraith F12 toggle).
+    // startRecord() arms a pending recording; the recorder is created and the
+    // file header written from the next config packet (so the file is clean).
+    // stopRecord() finalizes (closes) the file. isRecording() reports whether a
+    // recording is armed or running.
+    virtual bool startRecord(const QString &filePath, const QString &format) = 0;
+    virtual void stopRecord() = 0;
+    virtual bool isRecording() = 0;
+
+    // A/V sync: how many leading milliseconds of recorded audio to discard so it
+    // lines up with the video's first written frame. The audio tee + mic start at
+    // F12 (t=0), but the video recorder waits for the next keyframe before writing
+    // its first frame; on HEVC that can be several seconds later. This returns
+    // max(0, firstFrameMs - startMs), valid after stopRecord() until the next
+    // startRecord() (so the GUI can query it while muxing).
+    virtual qint64 getRecordAudioSkipMs() = 0;
 };
 
 class IDeviceManage : public QObject {

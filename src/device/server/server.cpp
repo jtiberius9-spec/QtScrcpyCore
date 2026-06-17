@@ -177,10 +177,15 @@ bool Server::execute()
     // https://github.com/Genymobile/scrcpy/commit/080a4ee3654a9b7e96c8ffe37474b5c21c02852a
     // <https://d.android.com/reference/android/media/MediaFormat>
     if (!m_params.codecOptions.isEmpty()) {
-        args << QString("codec_options=%1").arg(m_params.codecOptions);
+        args << QString("video_codec_options=%1").arg(m_params.codecOptions);
     }
     if (!m_params.codecName.isEmpty()) {
-        args << QString("encoder_name=%1").arg(m_params.codecName);
+        args << QString("video_encoder=%1").arg(m_params.codecName);
+    }
+    // 视频编码格式: h264(默认)/h265/av1。设备不支持所选编码时 scrcpy 会回退，
+    // 客户端按设备元信息里实际上报的编码解码，所以这里大胆请求 h265。
+    if (!m_params.videoCodec.isEmpty()) {
+        args << QString("video_codec=%1").arg(m_params.videoCodec);
     }
     args << "audio=false";
     // 服务端默认-1，可不传
@@ -355,11 +360,18 @@ bool Server::readInfo(VideoSocket *videoSocket, QString &deviceName, QSize &size
     buf[DEVICE_NAME_FIELD_LENGTH - 1] = '\0'; // in case the client sends garbage
     deviceName = QString::fromUtf8((const char *)buf);
 
-    // 前4个字节是AVCodecID,当前只支持H264,所以先不解析
+    // 设备元信息的前4字节是视频编码 fourcc (h264/h265/av1)，随后是宽高。
+    // 解析它，让解码器按实际编码初始化(不再写死 H264)。
+    m_videoCodecId = bufferRead32be(&buf[DEVICE_NAME_FIELD_LENGTH]);
     size.setWidth(bufferRead32be(&buf[DEVICE_NAME_FIELD_LENGTH + 4]));
     size.setHeight(bufferRead32be(&buf[DEVICE_NAME_FIELD_LENGTH + 8]));
 
     return true;
+}
+
+quint32 Server::getVideoCodecId()
+{
+    return m_videoCodecId;
 }
 
 void Server::startAcceptTimeoutTimer()

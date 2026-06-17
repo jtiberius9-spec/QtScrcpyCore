@@ -25,6 +25,7 @@ public:
 
     void installVideoSocket(VideoSocket* videoSocket);
     void setFrameSize(const QSize &frameSize);
+    void setCodec(quint32 codecId);   // scrcpy 视频编码 fourcc: h264/h265/av1
     bool startDecode();
     void stopDecode();
 
@@ -45,6 +46,7 @@ protected:
 private:
     QPointer<VideoSocket> m_videoSocket;
     QSize m_frameSize;
+    quint32 m_codecId = 0;   // scrcpy 视频编码 fourcc; 0 -> 默认 H264
 
     AVCodecContext *m_codecCtx = Q_NULLPTR;
     AVCodecParserContext *m_parser = Q_NULLPTR;

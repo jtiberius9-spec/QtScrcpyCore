@@ -46,9 +46,11 @@ public:
         // 例如 CodecOptions="profile=1,level=2"
         // 更多编码选项参考 https://d.android.com/reference/android/media/MediaFormat
         QString codecOptions = "";
-        // 指定编码器名称(必须是H.264编码器)，""表示默认
+        // 指定编码器名称，""表示默认
         // 例如 CodecName="OMX.qcom.video.encoder.avc"
         QString codecName = "";
+        // 视频编码格式 h264/h265/av1 (""=服务端默认)
+        QString videoCodec = "h265";
 
         QString crop = "";             // 视频裁剪
         bool control = true;           // 安卓端是否接收键鼠控制
@@ -64,6 +66,8 @@ public:
     Server::ServerParams getParams();
     VideoSocket *removeVideoSocket();
     QTcpSocket *getControlSocket();
+    // 服务端在设备元信息里上报的视频编码 fourcc (h264/h265/av1)，readInfo 之后有效
+    quint32 getVideoCodecId();
 
 signals:
     void serverStarted(bool success, const QString &deviceName = "", const QSize &size = QSize());
@@ -105,6 +109,7 @@ private:
     quint32 m_restartCount = 0;
     QString m_deviceName = "";
     QSize m_deviceSize = QSize();
+    quint32 m_videoCodecId = 0;   // fourcc from device meta: h264/h265/av1
     ServerParams m_params;
 
     SERVER_START_STEP m_serverStartStep = SSS_NULL;

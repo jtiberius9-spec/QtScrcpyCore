@@ -4,9 +4,16 @@
 #include <set>
 #include <QElapsedTimer>
 #include <QPointer>
+#include <QSize>
+#include <QString>
 #include <QTime>
 
 #include "../../include/QtScrcpyCore.h"
+
+extern "C"
+{
+#include "libavcodec/avcodec.h"
+}
 
 class QMouseEvent;
 class QWheelEvent;
@@ -73,6 +80,12 @@ public:
     void updateScript(QString script) override;
     bool isCurrentCustomKeymap() override;
 
+    // mid-session recording (F12 toggle)
+    bool startRecord(const QString &filePath, const QString &format) override;
+    void stopRecord() override;
+    bool isRecording() override;
+    qint64 getRecordAudioSkipMs() override;
+
 private:
     void initSignals();
     bool saveFrame(int width, int height, uint8_t* dataRGB32);
@@ -91,6 +104,28 @@ private:
     DeviceParams m_params;
     std::set<DeviceObserver*> m_deviceObservers;
     void* m_userData = nullptr;
+
+    // mid-session recording (F12 toggle):
+    // cached at connect so the recorder can be built on the next config packet.
+    QSize m_videoSize;                 // negotiated device video size
+    quint32 m_videoCodecId = 0;        // negotiated codec fourcc (h264/h265/av1)
+    QString m_recordFilePath;          // target output path for active recording
+    QString m_recordFormat;            // "mp4"/"mkv"
+    // Latest codec-config (SPS/PPS) packet, refreshed in getConfigFrame. scrcpy
+    // sends config essentially once at stream start, so we cache it to seed the
+    // file header when a mid-session F12 recording begins. Deep copy; freed on
+    // teardown.
+    AVPacket *m_cachedConfig = nullptr;
+    // After startRecord() the recorder exists but must skip data packets until
+    // the next keyframe so it starts on a clean GOP (header written from the
+    // cached config first).
+    bool m_recordWaitingKeyframe = false;
+    // A/V sync alignment: wall-clock at startRecord() (audio tee/mic also start
+    // here) vs. wall-clock when the recorder's first video frame is written (at
+    // the next keyframe). Their difference is the leading-audio skip the GUI mux
+    // applies. Not reset in stopRecord() so the GUI can query it while muxing.
+    qint64 m_recordStartMs = 0;
+    qint64 m_recordFirstFrameMs = 0;
 };
 
 }

@@ -78,6 +78,11 @@ void Demuxer::setFrameSize(const QSize &frameSize)
     m_frameSize = frameSize;
 }
 
+void Demuxer::setCodec(quint32 codecId)
+{
+    m_codecId = codecId;
+}
+
 static quint32 bufferRead32be(quint8 *buf)
 {
     return static_cast<quint32>((buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]);
@@ -120,12 +125,22 @@ void Demuxer::run()
     m_parser = Q_NULLPTR;
     AVPacket *packet = Q_NULLPTR;
 
+    // map the scrcpy codec fourcc reported by the device to an ffmpeg codec id.
+    // "h264"=0x68323634, "h265"=0x68323635, "av1"=0x00617631; default H264.
+    AVCodecID avCodecId = AV_CODEC_ID_H264;
+    if (m_codecId == 0x68323635) {
+        avCodecId = AV_CODEC_ID_HEVC;
+    } else if (m_codecId == 0x00617631) {
+        avCodecId = AV_CODEC_ID_AV1;
+    }
+
     // codec
-    const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    const AVCodec* codec = avcodec_find_decoder(avCodecId);
     if (!codec) {
-        qCritical("H.264 decoder not found");
+        qCritical("video decoder not found (codec id 0x%x)", m_codecId);
         goto runQuit;
     }
+    qInfo("video decoder: %s", codec->name);
 
     // codeCtx
     m_codecCtx = avcodec_alloc_context3(codec);
@@ -138,7 +153,7 @@ void Demuxer::run()
     m_codecCtx->height = m_frameSize.height();
     m_codecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-    m_parser = av_parser_init(AV_CODEC_ID_H264);
+    m_parser = av_parser_init(avCodecId);
     if (!m_parser) {
         qCritical("Could not initialize parser");
         goto runQuit;

@@ -1,4 +1,6 @@
+#include <QDateTime>
 #include <QDir>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QTimer>
 
@@ -39,26 +41,9 @@ Device::Device(DeviceParams params, QObject *parent) : IDevice(parent), m_params
     m_stream = new Demuxer(this);
 
     m_server = new Server(this);
-    if (m_params.recordFile && !m_params.recordPath.trimmed().isEmpty()) {
-        QString absFilePath;
-        QString fileDir(m_params.recordPath);
-        if (!fileDir.isEmpty()) {
-            QDateTime dateTime = QDateTime::currentDateTime();
-            QString fileName = dateTime.toString("_yyyyMMdd_hhmmss_zzz");
-            fileName = m_params.serial + fileName;
-            fileName.replace(":", "_");
-            fileName.replace(".", "_");
-            fileName += ("." + m_params.recordFileFormat);
-            QDir dir(fileDir);
-            if (!dir.exists()) {
-                if (!dir.mkpath(fileDir)) {
-                    qCritical() << QString("Failed to create the save folder: %1").arg(fileDir);
-                }
-            }
-            absFilePath = dir.absoluteFilePath(fileName);
-        }
-        m_recorder = new Recorder(absFilePath, this);
-    }
+    // Recording is now driven mid-session by the F12 toggle (startRecord/
+    // stopRecord), NOT created at connect time. The "record screen" checkbox
+    // no longer auto-creates a recorder; the GUI owns recording orchestration.
     initSignals();
 }
 
@@ -175,26 +160,21 @@ void Device::initSignals()
                 double diff = m_startTimeCount.elapsed() / 1000.0;
                 qInfo() << QString("server start finish in %1s").arg(diff).toStdString().c_str();
 
-                // init recorder
-                if (m_recorder) {
-                    m_recorder->setFrameSize(size);
-                    if (!m_recorder->open()) {
-                        qCritical("Could not open recorder");
-                    }
-
-                    if (!m_recorder->startRecorder()) {
-                        qCritical("Could not start recorder");
-                    }
-                }
+                // cache negotiated codec + frame size so a mid-session
+                // startRecord() can build the recorder on the next config packet
+                m_videoCodecId = m_server->getVideoCodecId();   // h264/h265/av1
+                m_videoSize = size;
 
                 // init decoder
                 if (m_decoder) {
+                    m_decoder->setCodec(m_server->getVideoCodecId());   // h264/h265/av1
                     m_decoder->open();
                 }
 
                 // init stream
                 m_stream->installVideoSocket(m_server->removeVideoSocket());
                 m_stream->setFrameSize(size);
+                m_stream->setCodec(m_server->getVideoCodecId());   // h264/h265/av1
                 m_stream->startDecode();
 
                 // recv device msg
@@ -240,12 +220,46 @@ void Device::initSignals()
                 qCritical("Could not send packet to decoder");
             }
 
-            if (m_recorder && !m_recorder->push(packet)) {
-                qCritical("Could not send packet to recorder");
+            if (m_recorder) {
+                if (m_recordWaitingKeyframe) {
+                    // Recording was just started mid-session: wait for the next
+                    // keyframe so the file begins on a clean GOP. Write the file
+                    // header from the cached config packet, then start at this
+                    // keyframe.
+                    if (packet->flags & AV_PKT_FLAG_KEY) {
+                        if (m_cachedConfig && !m_recorder->push(m_cachedConfig)) {
+                            qCritical("Could not send cached config packet to recorder");
+                        }
+                        m_recordWaitingKeyframe = false;
+                        // First video frame is being written now; the audio tee/
+                        // mic started back at startRecord(). Stamp this moment so
+                        // the GUI can trim the leading-audio gap for A/V sync.
+                        m_recordFirstFrameMs = QDateTime::currentMSecsSinceEpoch();
+                        if (!m_recorder->push(packet)) {
+                            qCritical("Could not send packet to recorder");
+                        }
+                    }
+                    // else: drop pre-keyframe P-frames (don't record a broken GOP)
+                } else if (!m_recorder->push(packet)) {
+                    qCritical("Could not send packet to recorder");
+                }
             }
         }, Qt::DirectConnection);
         connect(m_stream, &Demuxer::getConfigFrame, this, [this](AVPacket *packet) {
-            if (m_recorder && !m_recorder->push(packet)) {
+            // scrcpy emits the codec-config (SPS/PPS) packet essentially once at
+            // stream start (and on resolution change), NOT before every keyframe.
+            // Cache a fresh deep copy so a mid-session F12 startRecord() can seed
+            // the file header from it (the Recorder requires the first packet to
+            // be a config packet). Runs on the demuxer thread; ownership is freed
+            // on teardown in disconnectDevice().
+            if (m_cachedConfig) {
+                av_packet_free(&m_cachedConfig);
+            }
+            m_cachedConfig = av_packet_clone(packet);
+
+            // If a recorder already exists and is past its keyframe wait, keep
+            // feeding it config packets as before (e.g. resolution change).
+            if (m_recorder && !m_recordWaitingKeyframe && !m_recorder->push(packet)) {
                 qCritical("Could not send config packet to recorder");
             }
         }, Qt::DirectConnection);
@@ -288,8 +302,20 @@ bool Device::connectDevice()
         params.stayAwake = m_params.stayAwake;
         params.serverVersion = m_params.serverVersion;
         params.logLevel = m_params.logLevel;
-        params.codecOptions = m_params.codecOptions;
+        // Force a short keyframe/config interval (~1s) so that when the user
+        // hits F12 mid-session a config packet (and key frame) arrives quickly,
+        // letting startRecord() align the recording to a clean file header.
+        // Preserve any user-provided codec options; append ours.
+        {
+            QString codecOptions = m_params.codecOptions;
+            if (!codecOptions.trimmed().isEmpty()) {
+                codecOptions += ",";
+            }
+            codecOptions += "i-frame-interval:int=1";
+            params.codecOptions = codecOptions;
+        }
         params.codecName = m_params.codecName;
+        params.videoCodec = m_params.videoCodec;
         params.scid = m_params.scid;
 
         params.crop = "";
@@ -317,12 +343,25 @@ void Device::disconnectDevice()
         m_decoder->close();
     }
 
+    // finalize any in-progress recording (safety: F12-stop normally does this).
+    // The demuxer thread is already stopped (m_stream->stopDecode() waited above),
+    // so no getFrame/getConfigFrame push can race with this teardown.
+    m_recordWaitingKeyframe = false;
     if (m_recorder) {
-        if (m_recorder->isRunning()) {
-            m_recorder->stopRecorder();
-            m_recorder->wait();
+        Recorder *recorder = m_recorder;
+        m_recorder = Q_NULLPTR;
+        if (recorder->isRunning()) {
+            recorder->stopRecorder();
+            recorder->wait();
         }
-        m_recorder->close();
+        recorder->close();
+        delete recorder;
+    }
+
+    // free the cached codec-config packet (demuxer thread is stopped above, so
+    // no getConfigFrame push can race this).
+    if (m_cachedConfig) {
+        av_packet_free(&m_cachedConfig);
     }
 
     if (m_serverStartSuccess) {
@@ -601,6 +640,105 @@ bool Device::isCurrentCustomKeymap()
         return false;
     }
     return m_controller->isCurrentCustomKeymap();
+}
+
+bool Device::startRecord(const QString &filePath, const QString &format)
+{
+    if (filePath.trimmed().isEmpty()) {
+        qWarning() << "startRecord: empty file path";
+        return false;
+    }
+    if (m_recorder) {
+        // already recording
+        return false;
+    }
+    // Ensure the parent folder exists before we open the output file.
+    QFileInfo fileInfo(filePath);
+    QDir dir = fileInfo.absoluteDir();
+    if (!dir.exists()) {
+        if (!dir.mkpath(dir.absolutePath())) {
+            qCritical() << QString("Failed to create the save folder: %1").arg(dir.absolutePath());
+            return false;
+        }
+    }
+    m_recordFilePath = filePath;
+    m_recordFormat = format;
+
+    // Create + open + start the recorder IMMEDIATELY. scrcpy only sends the
+    // codec-config packet once at stream start, so we cannot wait for a new
+    // config packet to build the recorder (the old deferred design never fired
+    // mid-session). Instead we arm m_recordWaitingKeyframe: the getFrame lambda
+    // writes the header from the cached config and starts at the next keyframe
+    // (~1s away thanks to i-frame-interval:int=1).
+    Recorder *recorder = new Recorder(m_recordFilePath);
+    recorder->setCodec(m_videoCodecId);   // h264/h265/av1
+    recorder->setFrameSize(m_videoSize);
+    if (!m_recordFormat.trimmed().isEmpty()) {
+        if (0 == m_recordFormat.compare("mkv", Qt::CaseInsensitive)) {
+            recorder->setFormat(Recorder::RECORDER_FORMAT_MKV);
+        } else {
+            recorder->setFormat(Recorder::RECORDER_FORMAT_MP4);
+        }
+    }
+    if (!recorder->open()) {
+        qCritical("Could not open recorder");
+        delete recorder;
+        return false;
+    }
+    if (!recorder->startRecorder()) {
+        qCritical("Could not start recorder");
+        recorder->close();
+        delete recorder;
+        return false;
+    }
+    m_recordWaitingKeyframe = true;
+    // A/V sync: stamp the recording start (same instant the GUI starts the audio
+    // tee + mic) and clear any stale first-frame stamp from a prior session.
+    m_recordStartMs = QDateTime::currentMSecsSinceEpoch();
+    m_recordFirstFrameMs = 0;
+    m_recorder = recorder;
+    qInfo("recording started -> %s", qUtf8Printable(filePath));
+    return true;
+}
+
+void Device::stopRecord()
+{
+    if (!m_recorder) {
+        return;
+    }
+    // Detach the recorder pointer FIRST so the demuxer-thread push lambdas
+    // (getFrame/getConfigFrame) stop feeding it before we stop+close it.
+    Recorder *recorder = m_recorder;
+    m_recorder = Q_NULLPTR;
+    m_recordWaitingKeyframe = false;
+
+    if (recorder->isRunning()) {
+        recorder->stopRecorder();
+        recorder->wait();
+    }
+    recorder->close();   // synchronous finalize: file is muxable right after
+    // recorder->wait() above guarantees its thread has finished; we are not on
+    // the recorder's own thread, so a direct delete is safe (no event loop runs
+    // on it for deleteLater()).
+    delete recorder;
+    qInfo("recording stopped -> %s", qUtf8Printable(m_recordFilePath));
+}
+
+bool Device::isRecording()
+{
+    return m_recorder != Q_NULLPTR;
+}
+
+qint64 Device::getRecordAudioSkipMs()
+{
+    // Both stamps must be set (a recording started AND its first frame was
+    // written). The difference is how long the audio led the video; the GUI
+    // discards that many leading ms of audio so the muxed A/V lines up.
+    if (m_recordStartMs > 0 && m_recordFirstFrameMs > 0) {
+        const qint64 skip = m_recordFirstFrameMs - m_recordStartMs;
+        return skip > 0 ? skip : 0;
+    }
+    return 0;
 }
 
 bool Device::saveFrame(int width, int height, uint8_t* dataRGB32)
