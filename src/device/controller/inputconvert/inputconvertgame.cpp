@@ -389,18 +389,14 @@ void InputConvertGame::processSteerWheel(const KeyMap::KeyMapNode &node, const Q
         m_ctrlSteerWheel.touchKey = from->key();
         int id = attachTouchID(m_ctrlSteerWheel.touchKey);
         sendTouchDownEvent(id, node.data.steerWheel.centerPos);
-
-        getDelayQueue(node.data.steerWheel.centerPos, node.data.steerWheel.centerPos+offset,
-                      0.01f, 0.002f, 2, 8,
-                      m_ctrlSteerWheel.delayData.queuePos,
-                      m_ctrlSteerWheel.delayData.queueTimer);
-    } else {
-        getDelayQueue(m_ctrlSteerWheel.delayData.currentPos, node.data.steerWheel.centerPos+offset,
-                      0.01f, 0.002f, 2, 8,
-                      m_ctrlSteerWheel.delayData.queuePos,
-                      m_ctrlSteerWheel.delayData.queueTimer);
     }
-    m_ctrlSteerWheel.delayData.timer->start();
+
+    // Near-instant: snap straight to full tilt in ONE quick step instead of
+    // crawling out over ~10-20 micro-steps (2-8ms each). The single 5ms hop
+    // keeps a touch of organic motion (the game sees a fast drag, not a
+    // teleport) while feeling instant to the player.
+    m_ctrlSteerWheel.delayData.queuePos.enqueue(node.data.steerWheel.centerPos + offset);
+    m_ctrlSteerWheel.delayData.timer->start(5);
     return;
 }
 
