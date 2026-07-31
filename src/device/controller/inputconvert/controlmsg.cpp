@@ -131,6 +131,27 @@ qint16 ControlMsg::flostToI16fp(float f)
     return (qint16)i;
 }
 
+void ControlMsg::setUhidCreateData(quint16 id, quint16 vendorId, quint16 productId, const QString &name, const QByteArray &reportDesc)
+{
+    m_uhidId = id;
+    m_uhidVendorId = vendorId;
+    m_uhidProductId = productId;
+    // name is length-prefixed with a single byte on the wire, so 127 max
+    m_uhidName = name.toUtf8().left(127);
+    m_uhidPayload = reportDesc;
+}
+
+void ControlMsg::setUhidInputData(quint16 id, const QByteArray &report)
+{
+    m_uhidId = id;
+    m_uhidPayload = report;
+}
+
+void ControlMsg::setUhidDestroyData(quint16 id)
+{
+    m_uhidId = id;
+}
+
 QByteArray ControlMsg::serializeData()
 {
     QByteArray byteArray;
@@ -191,6 +212,26 @@ QByteArray ControlMsg::serializeData()
         break;
     case CMT_SET_DISPLAY_POWER:
         buffer.putChar(m_data.setDisplayPower.on);
+        break;
+    // Wire formats copied from scrcpy v3.3.3 app/src/control_msg.c so the
+    // bundled 3.3.3 server accepts them. Getting a field width wrong here fails
+    // SILENTLY (same trap as the old codec_options vs video_codec_options bug).
+    case CMT_UHID_CREATE:
+        BufferUtil::write16(buffer, m_uhidId);
+        BufferUtil::write16(buffer, m_uhidVendorId);
+        BufferUtil::write16(buffer, m_uhidProductId);
+        buffer.putChar(static_cast<char>(m_uhidName.size())); // write_string_tiny
+        buffer.write(m_uhidName);
+        BufferUtil::write16(buffer, static_cast<quint16>(m_uhidPayload.size()));
+        buffer.write(m_uhidPayload);
+        break;
+    case CMT_UHID_INPUT:
+        BufferUtil::write16(buffer, m_uhidId);
+        BufferUtil::write16(buffer, static_cast<quint16>(m_uhidPayload.size()));
+        buffer.write(m_uhidPayload);
+        break;
+    case CMT_UHID_DESTROY:
+        BufferUtil::write16(buffer, m_uhidId);
         break;
     case CMT_EXPAND_NOTIFICATION_PANEL:
     case CMT_EXPAND_SETTINGS_PANEL:

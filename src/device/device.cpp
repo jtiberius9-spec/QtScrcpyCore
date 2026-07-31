@@ -129,6 +129,11 @@ void Device::initSignals()
                 item->grabCursor(grab);
             }
         });
+        connect(m_controller, &Controller::recoilHint, this, [this](QString hint){
+            for (const auto& item : m_deviceObservers) {
+                item->recoilHint(hint);
+            }
+        });
     }
     if (m_fileHandler) {
         connect(m_fileHandler, &FileHandler::fileHandlerResult, this, [this](FileHandler::FILE_HANDLER_RESULT processResult, bool isApk) {
@@ -640,6 +645,22 @@ bool Device::isCurrentCustomKeymap()
         return false;
     }
     return m_controller->isCurrentCustomKeymap();
+}
+
+void Device::setPCMode(bool on)
+{
+    if (!m_controller) {
+        return;
+    }
+    m_controller->setPCMode(on);
+}
+
+bool Device::isPCMode()
+{
+    if (!m_controller) {
+        return false;
+    }
+    return m_controller->isPCMode();
 }
 
 bool Device::startRecord(const QString &filePath, const QString &format)

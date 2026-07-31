@@ -25,6 +25,12 @@ public:
     void updateScript(QString gameScript = "");
     bool isCurrentCustomKeymap();
 
+    // PC mode: swap the whole input converter for a UHID one (real HID keyboard +
+    // relative mouse). Because the converter is replaced, game-mode keymaps and
+    // their switchKey are inert while PC mode is on -- they cannot fight it.
+    void setPCMode(bool on);
+    bool isPCMode() const { return m_pcMode; }
+
     void postGoBack();
     void postGoHome();
     void postGoMenu();
@@ -54,6 +60,7 @@ public:
 
 signals:
     void grabCursor(bool grab);
+    void recoilHint(QString hint);
 
 protected:
     bool event(QEvent *event);
@@ -65,6 +72,8 @@ private:
 private:
     QPointer<Receiver> m_receiver;
     QPointer<InputConvertBase> m_inputConvert;
+    QString m_gameScript;  // remembered so leaving PC mode restores the keymap
+    bool m_pcMode = false;
     std::function<qint64(const QByteArray&)> m_sendData = Q_NULLPTR;
 };
 

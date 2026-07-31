@@ -4,6 +4,7 @@
 #include "controller.h"
 #include "controlmsg.h"
 #include "inputconvertgame.h"
+#include "inputconvertpc.h"
 #include "receiver.h"
 #include "videosocket.h"
 
@@ -43,8 +44,35 @@ void Controller::test(QRect rc)
     postControlMsg(controlMsg);
 }
 
+void Controller::setPCMode(bool on)
+{
+    if (m_pcMode == on) {
+        return;
+    }
+    m_pcMode = on;
+    if (!on) {
+        // deletes InputConvertPC (its dtor destroys the UHID devices) and rebuilds
+        // whichever converter was in use before
+        updateScript(m_gameScript);
+        return;
+    }
+    if (m_inputConvert) {
+        delete m_inputConvert;
+    }
+    m_inputConvert = new InputConvertPC(this);
+    Q_ASSERT(m_inputConvert);
+    connect(m_inputConvert, &InputConvertBase::grabCursor, this, &Controller::grabCursor);
+    connect(m_inputConvert, &InputConvertBase::recoilHint, this, &Controller::recoilHint);
+}
+
 void Controller::updateScript(QString gameScript)
 {
+    m_gameScript = gameScript;
+    if (m_pcMode) {
+        // PC mode owns the converter. Remember the script and apply it on exit,
+        // so switching keymaps in the editor cannot silently kill PC mode.
+        return;
+    }
     if (m_inputConvert) {
         delete m_inputConvert;
     }
@@ -57,6 +85,7 @@ void Controller::updateScript(QString gameScript)
     }
     Q_ASSERT(m_inputConvert);
     connect(m_inputConvert, &InputConvertBase::grabCursor, this, &Controller::grabCursor);
+    connect(m_inputConvert, &InputConvertBase::recoilHint, this, &Controller::recoilHint);
 }
 
 bool Controller::isCurrentCustomKeymap()

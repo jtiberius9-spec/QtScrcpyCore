@@ -41,7 +41,12 @@ public:
         CMT_GET_CLIPBOARD,
         CMT_SET_CLIPBOARD,
         CMT_SET_DISPLAY_POWER,
-        CMT_ROTATE_DEVICE
+        CMT_ROTATE_DEVICE,
+        // scrcpy server >= 2.4 (bundled server is 3.3.3, which supports these).
+        // Values MUST stay 12/13/14 to match the server's ControlMessageReader.
+        CMT_UHID_CREATE,  // 12
+        CMT_UHID_INPUT,   // 13
+        CMT_UHID_DESTROY  // 14
     };
 
     enum GetClipboardCopyKey {
@@ -70,6 +75,13 @@ public:
     void setSetClipboardMsgData(QString &text, bool paste);
     void setDisplayPowerData(bool on);
     void setBackOrScreenOnData(bool down);
+
+    // UHID: register a virtual HID device on the phone, then feed it HID reports.
+    // This is what gives a REAL relative mouse / physical keyboard to the device
+    // (touch injection cannot do relative motion).
+    void setUhidCreateData(quint16 id, quint16 vendorId, quint16 productId, const QString &name, const QByteArray &reportDesc);
+    void setUhidInputData(quint16 id, const QByteArray &report);
+    void setUhidDestroyData(quint16 id);
 
     QByteArray serializeData();
 
@@ -137,6 +149,14 @@ private:
     };
 
     ControlMsgData m_data;
+
+    // UHID payloads live OUTSIDE the union on purpose: QByteArray is non-trivial,
+    // and the union members are hand-managed POD-ish structs.
+    quint16 m_uhidId = 0;
+    quint16 m_uhidVendorId = 0;
+    quint16 m_uhidProductId = 0;
+    QByteArray m_uhidName;
+    QByteArray m_uhidPayload; // report descriptor (CREATE) or HID report (INPUT)
 };
 
 #endif // CONTROLMSG_H

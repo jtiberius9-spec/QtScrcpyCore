@@ -91,6 +91,8 @@ set(QSC_DEVICE_SOURCES
     src/device/controller/inputconvert/inputconvertnormal.cpp
     src/device/controller/inputconvert/inputconvertgame.h
     src/device/controller/inputconvert/inputconvertgame.cpp
+    src/device/controller/inputconvert/inputconvertpc.h
+    src/device/controller/inputconvert/inputconvertpc.cpp
     src/device/controller/inputconvert/controlmsg.h
     src/device/controller/inputconvert/controlmsg.cpp
     src/device/controller/inputconvert/keymap/keymap.h

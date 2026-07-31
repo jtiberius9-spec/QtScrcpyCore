@@ -79,6 +79,8 @@ public:
 
     void updateScript(QString script) override;
     bool isCurrentCustomKeymap() override;
+    void setPCMode(bool on) override;
+    bool isPCMode() override;
 
     // mid-session recording (F12 toggle)
     bool startRecord(const QString &filePath, const QString &format) override;

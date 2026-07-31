@@ -28,6 +28,7 @@ public:
     }
     virtual void updateFPS(quint32 fps) { Q_UNUSED(fps); }
     virtual void grabCursor(bool grab) {Q_UNUSED(grab);}
+    virtual void recoilHint(const QString &hint) { Q_UNUSED(hint); }
 
     virtual void mouseEvent(const QMouseEvent *from, const QSize &frameSize, const QSize &showSize) {
         Q_UNUSED(from);
@@ -125,6 +126,11 @@ public:
 
     virtual void updateScript(QString script) = 0;
     virtual bool isCurrentCustomKeymap() = 0;
+    // PC mode: real HID keyboard + relative mouse via UHID, for Wine/GameNative
+    // containers that expect a genuine mouse. Non-pure so any other IDevice
+    // implementation keeps compiling.
+    virtual void setPCMode(bool on) { Q_UNUSED(on); }
+    virtual bool isPCMode() { return false; }
 
     // Mid-session screen recording (Wraith F12 toggle).
     // startRecord() arms a pending recording; the recorder is created and the

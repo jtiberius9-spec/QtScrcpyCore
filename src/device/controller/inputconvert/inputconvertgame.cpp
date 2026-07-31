@@ -4,18 +4,38 @@
 #include <QTimer>
 #include <QTime>
 #include <QRandomGenerator>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 #include "inputconvertgame.h"
 
 #define CURSOR_POS_CHECK 50
 
+static bool qtKeyMatches(int qtKey, const QString &name);   // defined below
+
 InputConvertGame::InputConvertGame(Controller *controller) : InputConvertNormal(controller) {
     m_ctrlSteerWheel.delayData.timer = new QTimer(this);
     m_ctrlSteerWheel.delayData.timer->setSingleShot(true);
     connect(m_ctrlSteerWheel.delayData.timer, &QTimer::timeout, this, &InputConvertGame::onSteerWheelTimer);
+
+    m_recoil.timer = new QTimer(this);
+    m_recoil.timer->setInterval(10);   // ~100 Hz
+    connect(m_recoil.timer, &QTimer::timeout, this, &InputConvertGame::onRecoilTimer);
 }
 
-InputConvertGame::~InputConvertGame() {}
+InputConvertGame::~InputConvertGame()
+{
+    // If we're destroyed while in game mode (updateScript recreates the converter
+    // on every recoil/keymap change), Wraith has hidden + grabbed the cursor.
+    // Undo that here, or the cursor stays invisible until the app restarts.
+    if (m_gameMap) {
+        hideMouseCursor(false);
+#ifdef QT_NO_DEBUG
+        emit grabCursor(false);
+#endif
+    }
+}
 
 void InputConvertGame::mouseEvent(const QMouseEvent *from, const QSize &frameSize, const QSize &showSize)
 {
@@ -32,6 +52,14 @@ void InputConvertGame::mouseEvent(const QMouseEvent *from, const QSize &frameSiz
 
     if (!m_needBackMouseMove && m_gameMap) {
         updateSize(frameSize, showSize);
+        // recoil control: arm/disarm on fire (left mouse), without consuming the click
+        if (m_recoil.enabled && from->button() == Qt::LeftButton) {
+            if (QEvent::MouseButtonPress == from->type()) {
+                startRecoil();
+            } else if (QEvent::MouseButtonRelease == from->type()) {
+                stopRecoil();
+            }
+        }
         // mouse move
         if (m_keyMap.isValidMouseMoveMap()) {
             if (processMouseMove(from)) {
@@ -50,6 +78,16 @@ void InputConvertGame::wheelEvent(const QWheelEvent *from, const QSize &frameSiz
 {
     if (m_gameMap) {
         updateSize(frameSize, showSize);
+        // mouse wheel cycles the active scope preset (up = next, down = prev, wraps)
+        if (m_recoil.enabled && !m_recoil.scopes.isEmpty() && from->angleDelta().y() != 0) {
+            const int n = m_recoil.scopes.size();
+            if (from->angleDelta().y() > 0) {
+                m_recoil.activeScope = (m_recoil.activeScope + 1) % n;
+            } else {
+                m_recoil.activeScope = (m_recoil.activeScope - 1 + n) % n;
+            }
+            emit recoilHint(QString("Scope: %1").arg(m_recoil.scopes[m_recoil.activeScope].name));
+        }
     } else {
         InputConvertNormal::wheelEvent(from, frameSize, showSize);
     }
@@ -81,6 +119,25 @@ void InputConvertGame::keyEvent(const QKeyEvent *from, const QSize &frameSize, c
         updateSize(frameSize, showSize);
         if (!from || from->isAutoRepeat()) {
             return;
+        }
+
+        // gun slot follows your weapon keys (not consumed - the game still swaps).
+        // Enable/strength/pattern are tuned in the F8 recoil editor, not by hotkeys.
+        if (QEvent::KeyPress == from->type()) {
+            if (Qt::Key_1 == from->key()) {
+                m_recoil.slot = 1;
+                emit recoilHint(QString("Gun 1: %1").arg(m_recoil.slot1Gun));
+            } else if (Qt::Key_2 == from->key()) {
+                m_recoil.slot = 2;
+                emit recoilHint(QString("Gun 2: %1").arg(m_recoil.slot2Gun));
+            }
+            // scope presets: pressing a scope's hotkey makes it the active layer
+            for (int i = 0; i < m_recoil.scopes.size(); ++i) {
+                if (qtKeyMatches(from->key(), m_recoil.scopes[i].hotkey)) {
+                    m_recoil.activeScope = i;
+                    emit recoilHint(QString("Scope: %1").arg(m_recoil.scopes[i].name));
+                }
+            }
         }
 
         // small eyes
@@ -143,6 +200,202 @@ bool InputConvertGame::isCurrentCustomKeymap()
 void InputConvertGame::loadKeyMap(const QString &json)
 {
     m_keyMap.loadKeyMap(json);
+    loadRecoil(json);
+}
+
+// ---------------- recoil control ----------------
+// "recoilControl" in the keymap JSON:
+//   "recoilControl": {
+//     "enabled": true, "strength": 1.0, "strengthX": 1.0,
+//     "slot1Gun": "M16", "slot2Gun": "Ray Gun",
+//     "guns": [
+//       { "name":"M16", "vertical":0.25, "horizontal":0.0,
+//         "pattern":[ {"ms":150,"dx":0.1,"dy":0.35}, ... ] }   // pattern optional
+//     ]
+//   }
+// vertical/horizontal = SUSTAINED pull (px/s, whole burst -> long mags stay flat).
+// pattern = optional initial overlay; after it ends, sustained continues.
+static QVector<RecoilSeg> parsePattern(const QJsonValue &v)
+{
+    QVector<RecoilSeg> out;
+    for (const QJsonValue &e : v.toArray()) {
+        QJsonObject o = e.toObject();
+        RecoilSeg s;
+        s.ms = o.value("ms").toDouble(150.0);
+        s.dx = o.value("dx").toDouble(0.0);
+        s.dy = o.value("dy").toDouble(0.0);
+        out.append(s);
+    }
+    return out;
+}
+
+void InputConvertGame::loadRecoil(const QString &json)
+{
+    m_recoil.guns.clear();
+    m_recoil.slot1Gun.clear();
+    m_recoil.slot2Gun.clear();
+    QJsonObject root = QJsonDocument::fromJson(json.toUtf8()).object();
+    QJsonObject rc = root.value("recoilControl").toObject();
+    m_recoil.enabled = rc.value("enabled").toBool(false);
+    m_recoil.strength = rc.value("strength").toDouble(1.0);
+    m_recoil.strengthX = rc.value("strengthX").toDouble(m_recoil.strength);
+
+    const QJsonArray guns = rc.value("guns").toArray();
+    if (!guns.isEmpty()) {
+        for (const QJsonValue &gv : guns) {
+            QJsonObject go = gv.toObject();
+            RecoilGun g;
+            g.name = go.value("name").toString();
+            g.vertical = go.value("vertical").toDouble(0.0);
+            g.horizontal = go.value("horizontal").toDouble(0.0);
+            g.mulY = go.value("mulY").toDouble(1.0);
+            g.mulX = go.value("mulX").toDouble(1.0);
+            g.pattern = parsePattern(go.value("pattern"));
+            m_recoil.guns.append(g);
+        }
+        m_recoil.slot1Gun = rc.value("slot1Gun").toString();
+        m_recoil.slot2Gun = rc.value("slot2Gun").toString();
+    } else {
+        // backward compat with the old slot1/slot2 shape
+        auto mk = [&](const QString &name, const QJsonValue &v) {
+            RecoilGun g;
+            g.name = name;
+            if (v.isObject()) {
+                g.vertical = v.toObject().value("dy").toDouble(0.0);
+                g.horizontal = v.toObject().value("dx").toDouble(0.0);
+            } else if (v.isArray()) {
+                g.pattern = parsePattern(v);
+                if (!g.pattern.isEmpty()) {
+                    g.vertical = g.pattern.last().dy;
+                    g.horizontal = g.pattern.last().dx;
+                }
+            }
+            m_recoil.guns.append(g);
+        };
+        if (rc.contains("slot1")) mk("Slot 1", rc.value("slot1"));
+        if (rc.contains("slot2")) mk("Slot 2", rc.value("slot2"));
+        if (!m_recoil.guns.isEmpty()) m_recoil.slot1Gun = m_recoil.guns.first().name;
+        if (m_recoil.guns.size() > 1) m_recoil.slot2Gun = m_recoil.guns[1].name;
+    }
+    if (m_recoil.slot1Gun.isEmpty() && !m_recoil.guns.isEmpty()) {
+        m_recoil.slot1Gun = m_recoil.guns.first().name;
+    }
+
+    m_recoil.scopes.clear();
+    for (const QJsonValue &sv : rc.value("scopes").toArray()) {
+        QJsonObject so = sv.toObject();
+        RecoilScope s;
+        s.name = so.value("name").toString();
+        s.mulY = so.value("mulY").toDouble(1.0);
+        s.mulX = so.value("mulX").toDouble(1.0);
+        s.hotkey = so.value("hotkey").toString();
+        m_recoil.scopes.append(s);
+    }
+    m_recoil.activeScope = rc.value("activeScope").toInt(0);
+
+    qInfo() << "recoil:" << (m_recoil.enabled ? "ON" : "off") << "guns" << m_recoil.guns.size()
+            << "scopes" << m_recoil.scopes.size()
+            << "slot1" << m_recoil.slot1Gun << "slot2" << m_recoil.slot2Gun;
+}
+
+void InputConvertGame::startRecoil()
+{
+    if (!m_keyMap.isValidMouseMoveMap()) {
+        return;
+    }
+    m_recoil.firing = true;
+    m_recoil.elapsedMs = 0.0;
+    if (!m_recoil.timer->isActive()) {
+        m_recoil.timer->start();
+    }
+}
+
+void InputConvertGame::stopRecoil()
+{
+    m_recoil.firing = false;
+    m_recoil.timer->stop();
+}
+
+QPointF InputConvertGame::recoilVelocity()
+{
+    const QString &name = (m_recoil.slot == 2) ? m_recoil.slot2Gun : m_recoil.slot1Gun;
+    const RecoilGun *gun = nullptr;
+    for (const RecoilGun &g : m_recoil.guns) {
+        if (g.name == name) {
+            gun = &g;
+            break;
+        }
+    }
+    if (!gun) {
+        return QPointF(0.0, 0.0);
+    }
+    // sustained pull is the default; it runs the WHOLE burst (fixes long mags)
+    double dx = gun->horizontal, dy = gun->vertical;
+    if (!gun->pattern.isEmpty()) {
+        double dur = 0.0;
+        for (const RecoilSeg &s : gun->pattern) {
+            dur += s.ms;
+        }
+        if (m_recoil.elapsedMs <= dur) {           // still in the initial overlay
+            double acc = 0.0;
+            const RecoilSeg *seg = &gun->pattern.last();
+            for (const RecoilSeg &s : gun->pattern) {
+                acc += s.ms;
+                if (m_recoil.elapsedMs <= acc) {
+                    seg = &s;
+                    break;
+                }
+            }
+            dx = seg->dx;
+            dy = seg->dy;
+        }
+    }
+    double scopeY = 1.0, scopeX = 1.0;
+    if (m_recoil.activeScope >= 0 && m_recoil.activeScope < m_recoil.scopes.size()) {
+        scopeY = m_recoil.scopes[m_recoil.activeScope].mulY;
+        scopeX = m_recoil.scopes[m_recoil.activeScope].mulX;
+    }
+    return QPointF(dx * m_recoil.strengthX * gun->mulX * scopeX,
+                   dy * m_recoil.strength * gun->mulY * scopeY);
+}
+
+void InputConvertGame::onRecoilTimer()
+{
+    if (!m_recoil.enabled || !m_recoil.firing || !m_gameMap || !m_keyMap.isValidMouseMoveMap()) {
+        return;
+    }
+    QPointF v = recoilVelocity();
+    m_recoil.elapsedMs += m_recoil.timer->interval();
+    if (v.isNull()) {
+        return;
+    }
+    const double dt = m_recoil.timer->interval() / 1000.0;
+
+    // keep the look-touch alive (don't let the 500ms idle timer lift it)
+    if (!m_ctrlMouseMove.touching) {
+        mouseMoveStartTouch(nullptr);
+    }
+    startMouseMoveTimer();
+
+    // link to sensitivity: same speedRatio the mouse-look uses, so the numbers
+    // are in your aim's units. Convention: v.x + = pull LEFT, v.y + = pull DOWN.
+    QPointF sr = m_keyMap.getMouseMoveMap().data.mouseMove.speedRatio;
+    const double srx = (sr.x() != 0.0) ? sr.x() : 1.0;
+    const double sry = (sr.y() != 0.0) ? sr.y() : 1.0;
+    m_ctrlMouseMove.lastConverPos.setX(m_ctrlMouseMove.lastConverPos.x() - (v.x() / srx) * dt);
+    m_ctrlMouseMove.lastConverPos.setY(m_ctrlMouseMove.lastConverPos.y() + (v.y() / sry) * dt);
+
+    // When the pull nears an edge, lift the touch; the next tick re-plants it at
+    // the safe mouse-look anchor (startPos) and keeps pulling.
+    // NOTE: do NOT "seamlessly re-plant near the top/bottom" - those corners
+    // overlap the game's on-screen buttons, so it pressed random controls and
+    // broke WASD. The safe anchor is worth the tiny re-center.
+    if (m_ctrlMouseMove.lastConverPos.x() < 0.05 || m_ctrlMouseMove.lastConverPos.x() > 0.95
+        || m_ctrlMouseMove.lastConverPos.y() < 0.05 || m_ctrlMouseMove.lastConverPos.y() > 0.95) {
+        mouseMoveStopTouch();
+        return;
+    }
+    sendTouchMoveEvent(getTouchID(Qt::ExtraButton24), m_ctrlMouseMove.lastConverPos);
 }
 
 void InputConvertGame::updateSize(const QSize &frameSize, const QSize &showSize)
@@ -202,6 +455,28 @@ void InputConvertGame::sendTouchEvent(int id, QPointF pos, AndroidMotioneventAct
         QRect(absolutePos, m_frameSize),
         AMOTION_EVENT_ACTION_DOWN == action ? 1.0f : 0.0f);
     sendControlMsg(controlMsg);
+}
+
+// Does a Qt key event key match a stored hotkey name ("3","C","F1","Space")?
+static bool qtKeyMatches(int qtKey, const QString &name)
+{
+    if (name.isEmpty()) {
+        return false;
+    }
+    const QString n = name.trimmed().toUpper();
+    if (n.size() == 1) {
+        const QChar c = n.at(0);
+        if (c >= 'A' && c <= 'Z') return qtKey == (Qt::Key_A + (c.unicode() - 'A'));
+        if (c >= '0' && c <= '9') return qtKey == (Qt::Key_0 + (c.unicode() - '0'));
+    }
+    if (n.startsWith('F')) {
+        bool ok = false;
+        const int f = n.mid(1).toInt(&ok);
+        if (ok && f >= 1 && f <= 12) return qtKey == (Qt::Key_F1 + f - 1);
+    }
+    if (n == "SPACE") return qtKey == Qt::Key_Space;
+    if (n == "TAB") return qtKey == Qt::Key_Tab;
+    return false;
 }
 
 void InputConvertGame::sendKeyEvent(AndroidKeyeventAction action, AndroidKeycode keyCode) {
@@ -391,12 +666,24 @@ void InputConvertGame::processSteerWheel(const KeyMap::KeyMapNode &node, const Q
         sendTouchDownEvent(id, node.data.steerWheel.centerPos);
     }
 
-    // Near-instant: snap straight to full tilt in ONE quick step instead of
-    // crawling out over ~10-20 micro-steps (2-8ms each). The single 5ms hop
-    // keeps a touch of organic motion (the game sees a fast drag, not a
-    // teleport) while feeling instant to the player.
-    m_ctrlSteerWheel.delayData.queuePos.enqueue(node.data.steerWheel.centerPos + offset);
-    m_ctrlSteerWheel.delayData.timer->start(5);
+    // Smoothly sweep the joystick from where it is to the new full-tilt point,
+    // instead of teleporting straight to the rim. A one-hop snap reaches the
+    // circle so fast it feels "boxed"/twitchy on taps and direction changes;
+    // ramping across ~12 micro-steps (~3-6ms each, ~50ms total) restores the
+    // smooth round-the-circle feel while staying responsive.
+    if (pressedNum == 1 && flag) {
+        m_ctrlSteerWheel.delayData.currentPos = node.data.steerWheel.centerPos;
+    }
+    const QPointF target = node.data.steerWheel.centerPos + offset;
+    getDelayQueue(m_ctrlSteerWheel.delayData.currentPos, target,
+                  0.008, 0.002, 3, 6,
+                  m_ctrlSteerWheel.delayData.queuePos, m_ctrlSteerWheel.delayData.queueTimer);
+    if (!m_ctrlSteerWheel.delayData.queueTimer.isEmpty()) {
+        m_ctrlSteerWheel.delayData.timer->start(m_ctrlSteerWheel.delayData.queueTimer.dequeue());
+    } else {
+        sendTouchMoveEvent(getTouchID(m_ctrlSteerWheel.touchKey), target);
+        m_ctrlSteerWheel.delayData.currentPos = target;
+    }
     return;
 }
 
@@ -724,6 +1011,7 @@ bool InputConvertGame::switchGameMap()
     hideMouseCursor(m_gameMap);
 
     if (!m_gameMap) {
+        stopRecoil();
         stopMouseMoveTimer();
         mouseMoveStopTouch();
     }

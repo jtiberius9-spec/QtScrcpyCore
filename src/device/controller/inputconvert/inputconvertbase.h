@@ -28,6 +28,7 @@ public:
 
 signals:
     void grabCursor(bool grab);
+    void recoilHint(QString hint);   // brief on-screen note (scope/gun change)
 
 protected:
     void sendControlMsg(ControlMsg *msg);
